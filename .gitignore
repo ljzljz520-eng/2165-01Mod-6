@@ -23,3 +23,9 @@ __pycache__/
 *.log
 .env
 .env.*
+
+# C build artifacts
+arknights_td
+*.o
+*.out
+*.dSYM/

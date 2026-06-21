@@ -80,6 +80,10 @@ static long g_tick_sleep_ms = 180;
 static long g_wave_clear_sleep_ms = 700;
 static bool g_no_clear = false;
 
+static bool g_paused = false;
+static int g_speed_multiplier = 1;
+static bool g_single_step = false;
+
 typedef struct {
     struct termios original;
     bool active;
@@ -723,7 +727,7 @@ static void print_tips(void) {
     printf("  - 敌人走到终点会让基地生命 -1。\n");
     printf("  - 击杀敌人会获得费用，波次结束额外 +5 费用。\n");
     printf("  - 费用够时可用 升级 x y 强化已有干员。\n");
-    printf("  - 战斗阶段是自动进行，战斗中不能输入指令。\n");
+    printf("  - 战斗中快捷键：P/空格 暂停，1/2 切换倍速，S 单步调试(再按空格推进1帧)。\n");
     printf("  - 随时输入 help/帮助 或 tips/提示 查看说明。\n\n");
 }
 
@@ -752,7 +756,12 @@ static void print_help(void) {
     printf("  help / 帮助               显示帮助\n");
     printf("  tips / 提示               查看玩法提示\n");
     printf("  quit / 退出               退出游戏\n\n");
-    printf("说明：战斗阶段为自动战斗，无法输入指令；请在准备阶段完成部署和升级。\n\n");
+    printf("战斗中快捷键：\n");
+    printf("  P / 空格                  暂停/继续\n");
+    printf("  1 / 2                     切换 1x / 2x 倍速\n");
+    printf("  S                         进入单步调试模式(再按 S 退出)\n");
+    printf("  空格(单步模式下)           推进 1 帧，用于观察伤害与阻挡\n\n");
+    printf("说明：倍速会同时加快计时、出怪、技能冷却。\n\n");
 }
 
 static bool starts_with_icase(const char *line, const char *prefix) {
@@ -825,37 +834,106 @@ static bool prep_phase(Game *game) {
     }
 }
 
+static void render_battle_hud(const Game *game, int tick) {
+    clear_screen();
+    render_board(game, true);
+    printf("第 %d 波 | 战斗轮次: %d | ", game->wave, tick);
+    if (g_single_step) {
+        printf("[单步调试] ");
+    }
+    if (g_paused) {
+        printf("已暂停");
+    } else {
+        printf("速度 %dx", g_speed_multiplier);
+    }
+    printf("\n");
+    printf("战斗控制: P/空格 暂停 | S 单步模式(按空格推进1帧) | 1/2 切换速度\n");
+}
+
 static bool run_wave(Game *game, const WaveConfig *cfg) {
     int spawned = 0;
     int tick = 0;
+    RawModeGuard guard;
+    bool use_raw = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+    bool raw_enabled = false;
+    bool step_pending = false;
+
+    g_paused = false;
+    g_single_step = false;
+    g_speed_multiplier = 1;
+
+    if (use_raw) {
+        raw_enabled = enable_raw_mode(&guard);
+    }
+
     while (true) {
-        if (spawned < cfg->enemy_count && tick % cfg->spawn_interval == 0) {
-            if (spawn_enemy(game, cfg)) {
-                spawned += 1;
+        bool should_tick = false;
+
+        if (use_raw && raw_enabled) {
+            unsigned char ch = 0;
+            while (read_stdin_byte_timeout(&ch, 0)) {
+                if (ch == 'p' || ch == 'P' || ch == ' ') {
+                    if (g_single_step) {
+                        step_pending = true;
+                    } else {
+                        g_paused = !g_paused;
+                    }
+                } else if (ch == 's' || ch == 'S') {
+                    g_single_step = !g_single_step;
+                    if (g_single_step) {
+                        g_paused = true;
+                    }
+                } else if (ch == '1') {
+                    g_speed_multiplier = 1;
+                } else if (ch == '2') {
+                    g_speed_multiplier = 2;
+                }
             }
         }
 
-        towers_attack(game);
-        enemies_move(game);
-
-        clear_screen();
-        render_board(game, true);
-        printf("第 %d 波 | 战斗轮次: %d\n", game->wave, tick);
-        printf("战斗提示：自动战斗中，敌人到达终点会扣基地生命，击杀敌人可获得费用。\n");
-
-        if (game->hp <= 0) {
-            return false;
+        if (g_single_step) {
+            if (step_pending) {
+                should_tick = true;
+                step_pending = false;
+                g_paused = true;
+            }
+        } else if (!g_paused) {
+            should_tick = true;
         }
 
-        if (spawned >= cfg->enemy_count && !has_live_enemies(game)) {
-            game->gold += 5;
-            printf("波次 %d 完成！额外获得 5 费用。\n", game->wave);
-            sleep_ms(g_wave_clear_sleep_ms);
-            return true;
+        if (should_tick) {
+            if (spawned < cfg->enemy_count && tick % cfg->spawn_interval == 0) {
+                if (spawn_enemy(game, cfg)) {
+                    spawned += 1;
+                }
+            }
+
+            towers_attack(game);
+            enemies_move(game);
+
+            if (game->hp <= 0) {
+                render_battle_hud(game, tick);
+                if (raw_enabled) disable_raw_mode(&guard);
+                return false;
+            }
+
+            if (spawned >= cfg->enemy_count && !has_live_enemies(game)) {
+                game->gold += 5;
+                render_battle_hud(game, tick);
+                printf("波次 %d 完成！额外获得 5 费用。\n", game->wave);
+                if (raw_enabled) disable_raw_mode(&guard);
+                sleep_ms(g_wave_clear_sleep_ms / g_speed_multiplier);
+                return true;
+            }
+
+            tick += 1;
         }
 
-        tick += 1;
-        sleep_ms(g_tick_sleep_ms);
+        render_battle_hud(game, tick);
+
+        long sleep_for = g_tick_sleep_ms / (should_tick ? g_speed_multiplier : 1);
+        if (sleep_for < 10) sleep_for = 10;
+        sleep_ms(sleep_for);
     }
 }
 
