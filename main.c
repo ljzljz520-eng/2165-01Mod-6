@@ -882,6 +882,8 @@ static bool run_wave(Game *game, const WaveConfig *cfg) {
                     g_single_step = !g_single_step;
                     if (g_single_step) {
                         g_paused = true;
+                    } else {
+                        g_paused = false;
                     }
                 } else if (ch == '1') {
                     g_speed_multiplier = 1;

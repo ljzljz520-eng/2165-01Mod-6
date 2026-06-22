@@ -1,5 +1,5 @@
 #!/usr/bin/expect -f
-set timeout 8
+set timeout 15
 encoding system utf-8
 
 proc fail {msg} {
@@ -16,8 +16,8 @@ if {[catch {exec make >/dev/null} err]} {
 }
 
 set env(TD_NO_CLEAR) 1
-set env(TD_TICK_MS) 0
-set env(TD_WAVE_CLEAR_MS) 0
+set env(TD_TICK_MS) 40
+set env(TD_WAVE_CLEAR_MS) 50
 
 spawn ./arknights_td
 
@@ -74,14 +74,99 @@ expect {
   timeout { fail "missing prompt after map scenario" }
 }
 
+# 场景 D: 战斗控制 - 暂停 / 倍速 / 单步调试
+send -- "start\r"
+expect {
+  -re {战斗轮次: \d+ \| } {}
+  timeout { fail "did not enter battle phase" }
+}
+
+# 测试暂停: 按 P 暂停，检查显示"已暂停"
+send -- "p"
+expect {
+  -re {已暂停} {}
+  timeout { fail "pause did not show '已暂停'" }
+}
+# 再按 P 继续
+send -- "p"
+expect {
+  -re {速度 1x} {}
+  timeout { fail "resume did not show '速度 1x'" }
+}
+
+# 测试倍速: 按 2 切换到 2x
+send -- "2"
+expect {
+  -re {速度 2x} {}
+  timeout { fail "speed 2x did not activate" }
+}
+# 按 1 切回 1x
+send -- "1"
+expect {
+  -re {速度 1x} {}
+  timeout { fail "speed 1x did not activate" }
+}
+
+# 测试单步模式: 按 S 进入单步
+send -- "s"
+expect {
+  -re {\[单步调试\]} {}
+  timeout { fail "single step mode did not activate" }
+}
+expect {
+  -re {已暂停} {}
+  timeout { fail "single step should also pause" }
+}
+
+# 记录当前 tick，按空格推进一帧
+expect -re {战斗轮次: (\d+) } {
+  set tick_before $expect_out(1,string)
+}
+send -- " "
+# 验证 tick 增加了 1
+expect -re {战斗轮次: (\d+) } {
+  set tick_after $expect_out(1,string)
+  if {$tick_after != $tick_before + 1} {
+    fail "single step tick mismatch: expected [expr $tick_before + 1], got $tick_after"
+  }
+}
+
+# 再按一次空格，再验证一次
+set tick_before $tick_after
+send -- " "
+expect -re {战斗轮次: (\d+) } {
+  set tick_after $expect_out(1,string)
+  if {$tick_after != $tick_before + 1} {
+    fail "second single step tick mismatch: expected [expr $tick_before + 1], got $tick_after"
+  }
+}
+
+# 按 S 退出单步模式，恢复正常战斗
+send -- "s"
+expect {
+  -re {速度 1x} {}
+  timeout { fail "exit single step did not return to normal speed" }
+}
+
+# 等待波次完成
+expect {
+  -re {波次 1 完成！额外获得 5 费用。} {}
+  timeout { fail "wave 1 did not complete successfully" }
+}
+
+expect {
+  -re {第2波 > $} {}
+  timeout { fail "did not return to prep phase after wave 1" }
+}
+
 send -- "quit\r"
 expect {
   -re {游戏结束（主动退出）。} {}
-  timeout { fail "missing quit message" }
+  timeout { fail "missing quit message after battle test" }
 }
 expect eof
 
-# 场景 D: 非 TTY 管道输入兼容
+# 场景 E: 非 TTY 管道输入兼容
 set pipe_out ""
 if {[catch {set pipe_out [exec sh -c "printf 'help\\nquit\\n' | TD_NO_CLEAR=1 TD_TICK_MS=0 TD_WAVE_CLEAR_MS=0 ./arknights_td"]} err]} {
   fail "pipe compatibility command failed: $err"
@@ -91,6 +176,15 @@ if {[string first "place x y /" $pipe_out] < 0} {
 }
 if {[string first "quit /" $pipe_out] < 0} {
   fail "pipe run missing expected command list"
+}
+
+# 场景 F: 管道输入下战斗控制不生效（非 TTY 安全兼容）
+set pipe_battle ""
+if {[catch {set pipe_battle [exec sh -c "printf 'place 3 2\\nstart\\n' | TD_NO_CLEAR=1 TD_TICK_MS=0 TD_WAVE_CLEAR_MS=0 TD_MAX_WAVES=1 ./arknights_td"]} err]} {
+  fail "pipe battle command failed: $err"
+}
+if {[string first "恭喜通关" $pipe_battle] < 0} {
+  fail "pipe battle should complete normally even with battle control features"
 }
 
 puts "INTERACTIVE REGRESSION PASSED"
